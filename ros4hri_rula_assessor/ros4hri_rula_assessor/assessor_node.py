@@ -33,14 +33,15 @@ REQUIRED = ("upper_arm_flexion", "lower_arm_flexion", "neck_flexion", "trunk_fle
 # and hri_fullbody. {side} is r/l, {id} the REP-155 body id. The model has no wrist joints,
 # so the wrist roles are empty by default; a VR hand-tracking node may add them.
 ROS4HRI_JOINTS = {
-    "upper_arm_flexion": "{side}_p_shoulder_{id}",      # shoulder pitch: raise arm forward
-    "upper_arm_abduction": "{side}_y_shoulder_{id}",    # shoulder yaw: arm out to the side
+    "upper_arm_flexion": "{side}_upper_arm_flexion_{id}|{side}_p_shoulder_{id}",      # explicit sagittal angle, else shoulder pitch
+    "upper_arm_abduction": "{side}_upper_arm_abduction_{id}|{side}_y_shoulder_{id}",  # explicit frontal angle, else shoulder yaw
     "lower_arm_flexion": "{side}_elbow_{id}",           # 0 = straight arm
-    "wrist_flexion": "", "wrist_deviation": "", "wrist_twist": "",
-    "neck_flexion": "p_head_{id}",                      # head pitch
-    "neck_twist": "y_head_{id}",                        # head yaw
-    "neck_side_bend": "r_head_{id}",                    # head roll
-    "trunk_flexion": "waist_{id}",                      # waist pitch
+    "wrist_flexion": "{side}_wrist_flexion_{id}", "wrist_deviation": "{side}_wrist_deviation_{id}",
+    "wrist_twist": "{side}_wrist_twist_{id}",      # not in human_description; published by openxr_body
+    "neck_flexion": "neck_flexion_{id}|-p_head_{id}",   # explicit, else head pitch (model: + = extension, hence '-')
+    "neck_twist": "neck_twist_{id}|y_head_{id}",        # head yaw
+    "neck_side_bend": "neck_side_bend_{id}|r_head_{id}",  # head roll
+    "trunk_flexion": "trunk_flexion_{id}|waist_{id}",   # waist pitch (+ = lean forward)
     "trunk_twist": "", "trunk_side_bend": "",
 }
 
@@ -54,6 +55,7 @@ class RulaAssessor(Node):
         self.declare_parameter("static_posture_s", 60.0)
         self.declare_parameter("force_load", 0)
         self.declare_parameter("legs", 1)
+        self.declare_parameter("sitting_supported", True)
         self.declare_parameter("bodies_topic", "/humans/bodies/tracked")
         side = str(self.get_parameter("side").value)
         self.side_letter = "r" if side == "right" else "l"
@@ -69,6 +71,7 @@ class RulaAssessor(Node):
         self.static_s = float(p("static_posture_s").value)
         self.force = int(p("force_load").value)
         self.legs = int(p("legs").value)
+        self.sitting = bool(p("sitting_supported").value)
 
         self.bodies = {}          # id -> dict(sub, js, rx_time, posture_key, posture_since)
         self.create_subscription(IdsList, str(p("bodies_topic").value), self.on_ids, 10)
@@ -95,22 +98,36 @@ class RulaAssessor(Node):
         if b is not None:
             b["js"], b["rx"] = msg, self.get_clock().now()
 
-    def joint_name(self, role, bid):
+    def joint_name(self, role, bid, available=None):
+        """Template may list alternatives separated by '|' (first one present wins) and a leading '-'
+        negates the value. Returns (name, sign)."""
         tpl = self.joint_tpl.get(role, "")
-        return tpl.format(side=self.side_letter, id=bid) if tpl else ""
+        if not tpl:
+            return "", 1.0
+        cands = []
+        for t in tpl.split("|"):
+            sign = -1.0 if t.startswith("-") else 1.0
+            cands.append((t.lstrip("-").format(side=self.side_letter, id=bid), sign))
+        if available is not None:
+            for n, sg in cands:
+                if n in available:
+                    return n, sg
+        return cands[0]
 
     def angles_from(self, js: JointState, bid: str):
         pos = dict(zip(js.name, js.position))
         vals, missing, untracked = {}, [], []
         for role in ROLES:
-            name = self.joint_name(role, bid)
+            name, sign = self.joint_name(role, bid, pos)
             if not name:
                 untracked.append(role)
             elif name in pos:
-                v = math.degrees(pos[name])
+                v = sign * math.degrees(pos[name])
                 vals[role] = -v if role in self.invert else v
             elif role in REQUIRED:
                 missing.append(name)
+            else:
+                untracked.append(role)
         return Angles(**vals), missing, untracked
 
     def tick(self):
@@ -129,13 +146,13 @@ class RulaAssessor(Node):
                 self.pub.publish(m)
                 continue
             key = None
-            r = assess(a, legs=self.legs, muscle_use=0, force_load=self.force)
+            r = assess(a, legs=self.legs, muscle_use=0, force_load=self.force, sitting_supported=self.sitting)
             key = (r.table_a, r.table_b)
             if b["key"] != key:
                 b["key"], b["since"] = key, now
             static = (now - b["since"]).nanoseconds * 1e-9 >= self.static_s
             if static:
-                r = assess(a, legs=self.legs, muscle_use=1, force_load=self.force)
+                r = assess(a, legs=self.legs, muscle_use=1, force_load=self.force, sitting_supported=self.sitting)
             m.header.stamp = b["js"].header.stamp if b["js"].header.stamp.sec else now.to_msg()
             m.valid = True
             m.score, m.action_level = r.score, r.action_level

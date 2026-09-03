@@ -26,7 +26,8 @@ setup(
     entry_points={
         'console_scripts': [
             'assessor = ros4hri_rula_assessor.assessor_node:main',
-            'body_sim = ros4hri_rula_assessor.body_sim:main'
+            'body_sim = ros4hri_rula_assessor.body_sim:main',
+            'openxr_body = ros4hri_rula_assessor.openxr_body:main'
         ],
     },
 )

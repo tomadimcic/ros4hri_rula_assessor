@@ -113,7 +113,7 @@ def arm_angles(shoulder, elbow, hand):
         roll = math.degrees(math.atan2(v_dot(v_cross(a, b), u), v_dot(a, b)))
     elbow_flex = 180.0 - angle_between(tuple(-c for c in up_arm), fore)
     flexion = math.degrees(math.atan2(up_arm[0], -up_arm[2]))
-    abduction = math.degrees(math.atan2(-up_arm[1], -up_arm[2]))
+    abduction = math.degrees(math.asin(max(-1.0, min(1.0, -u[1]))))     # lateral elevation, right arm outward positive
     return dict(polar=polar, azimuth=azimuth, roll=roll, elbow=elbow_flex, flexion=flexion, abduction=abduction)
 
 

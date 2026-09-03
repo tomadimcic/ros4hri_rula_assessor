@@ -167,16 +167,18 @@ def assess(a: Angles, legs=1, muscle_use=0, force_load=0, **flags) -> Result:
     score = TABLE_C[_clamp(sa, 1, 8) - 1][_clamp(sb, 1, 7) - 1]
     level = 1 if score <= 2 else (2 if score <= 4 else (3 if score <= 6 else 4))
     drivers = []
+    def fe(v):
+        return f"flexion {v:.0f} deg" if v >= 0 else f"extension {-v:.0f} deg"
     if ua >= 3:
-        drivers.append(f"upper arm {ua} (flexion {a.upper_arm_flexion:.0f} deg, abduction {a.upper_arm_abduction:.0f} deg)")
+        drivers.append(f"upper arm {ua} ({fe(a.upper_arm_flexion)}, abduction {abs(a.upper_arm_abduction):.0f} deg)")
     if la >= 2:
         drivers.append(f"lower arm {la} (elbow {a.lower_arm_flexion:.0f} deg)")
     if wr >= 3:
         drivers.append(f"wrist {wr} (flexion {a.wrist_flexion:.0f} deg, deviation {a.wrist_deviation:.0f} deg)")
     if nk >= 3:
-        drivers.append(f"neck {nk} (flexion {a.neck_flexion:.0f} deg)")
+        drivers.append(f"neck {nk} ({fe(a.neck_flexion)})")
     if tr >= 3:
-        drivers.append(f"trunk {tr} (flexion {a.trunk_flexion:.0f} deg)")
+        drivers.append(f"trunk {tr} ({fe(a.trunk_flexion)})")
     if muscle_use:
         drivers.append("static posture > 1 min")
     if force_load:

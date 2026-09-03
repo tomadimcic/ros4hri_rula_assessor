@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 # Copyright 2026 Entanglenet GmbH
 # SPDX-License-Identifier: LGPL-3.0-only
-"""body_sim: synthetic REP-155 body for testing the RULA assessor without a headset.
+"""body_sim: synthetic REP-155 body built on the ROS4HRI human model.
 
-Publishes /humans/bodies/tracked (IdsList) and /humans/bodies/<id>/joint_states with a
-deterministic posture timeline: good posture -> overhead reach -> moderate -> good.
-Optional tracking dropout (dropout_at_s) to exercise the validity flag.
+Behaves like hri_body_detect / hri_fullbody for one body:
+  /humans/bodies/tracked               hri_msgs/IdsList
+  /humans/bodies/<id>/joint_states     sensor_msgs/JointState  (all joints of human_description)
+  /humans/bodies/<id>/urdf             std_msgs/String, latched (rendered from human-tpl.xacro)
+  TF                                    world -> body_<id>, plus the skeleton via a spawned
+                                        robot_state_publisher (same pattern as hri_body_detect)
+
+Posture timeline: good -> overhead reach -> moderate -> good (45 s loop), optional dropout.
 """
 import math
+import subprocess
 
 import rclpy
+from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import TransformStamped
 from hri_msgs.msg import IdsList
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
+from tf2_ros import StaticTransformBroadcaster
 
-# (duration_s, angles in degrees)  keys are the assessor's default right-side joint names
+# (duration_s, angles in degrees) keyed by ROS4HRI joint name without the _<id> suffix.
+# Unlisted joints stay at their rest value.
+REST = dict(waist=2, r_head=0, y_head=0, p_head=8,
+            r_y_shoulder=5, r_p_shoulder=15, r_r_shoulder=0, r_elbow=90,
+            l_y_shoulder=3, l_p_shoulder=10, l_r_shoulder=0, l_elbow=30,
+            r_y_hip=0, r_p_hip=0, r_r_hip=0, r_knee=0, l_y_hip=0, l_p_hip=0, l_r_hip=0, l_knee=0)
 PHASES = [
-    (15.0, dict(r_shoulder_flexion=15, r_shoulder_abduction=5, r_elbow_flexion=90, r_wrist_flexion=5,
-                r_wrist_deviation=0, r_wrist_twist=10, neck_flexion=8, neck_twist=0, neck_side_bend=0,
-                trunk_flexion=3, trunk_twist=0, trunk_side_bend=0)),               # good: RULA ~2
-    (15.0, dict(r_shoulder_flexion=65, r_shoulder_abduction=35, r_elbow_flexion=120, r_wrist_flexion=20,
-                r_wrist_deviation=10, r_wrist_twist=50, neck_flexion=25, neck_twist=0, neck_side_bend=0,
-                trunk_flexion=22, trunk_twist=0, trunk_side_bend=0)),              # reach: RULA 5+
-    (15.0, dict(r_shoulder_flexion=35, r_shoulder_abduction=15, r_elbow_flexion=80, r_wrist_flexion=12,
-                r_wrist_deviation=0, r_wrist_twist=20, neck_flexion=15, neck_twist=0, neck_side_bend=0,
-                trunk_flexion=10, trunk_twist=0, trunk_side_bend=0)),              # moderate: RULA 3-4
+    (15.0, dict(r_p_shoulder=15, r_y_shoulder=5, r_elbow=90, p_head=8, waist=2)),      # good: RULA ~2
+    (15.0, dict(r_p_shoulder=65, r_y_shoulder=35, r_elbow=120, p_head=25, waist=22)),  # reach: RULA 5+
+    (15.0, dict(r_p_shoulder=35, r_y_shoulder=15, r_elbow=80, p_head=15, waist=10)),   # moderate: RULA 3-4
 ]
 BLEND_S = 3.0
 
@@ -33,22 +43,59 @@ class BodySim(Node):
     def __init__(self):
         super().__init__("body_sim")
         self.declare_parameter("body_id", "b_sim01")
+        self.declare_parameter("height_m", 1.75)
         self.declare_parameter("rate_hz", 30.0)
         self.declare_parameter("ids_rate_hz", 10.0)
         self.declare_parameter("dropout_at_s", -1.0)
         self.declare_parameter("dropout_duration_s", 2.0)
+        self.declare_parameter("world_frame", "world")
+        self.declare_parameter("body_pose", [-2.0, 1.5, 0.0, 0.0])   # x y z yaw of body_<id> in world
+        self.declare_parameter("spawn_state_publisher", True)
         p = self.get_parameter
         self.bid = str(p("body_id").value)
         self.rate = float(p("rate_hz").value)
         self.dropout_at = float(p("dropout_at_s").value)
         self.dropout_len = float(p("dropout_duration_s").value)
+
+        latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             history=HistoryPolicy.KEEP_LAST, depth=1)
+        js_topic = f"/humans/bodies/{self.bid}/joint_states"
+        urdf_topic = f"/humans/bodies/{self.bid}/urdf"
         self.pub_ids = self.create_publisher(IdsList, "/humans/bodies/tracked", 10)
-        self.pub_js = self.create_publisher(JointState, f"/humans/bodies/{self.bid}/joint_states", 10)
+        self.pub_js = self.create_publisher(JointState, js_topic, 10)
+        self.pub_urdf = self.create_publisher(String, urdf_topic, latched)
+
+        # Body model from ros4hri/human_description, exactly as hri_body_detect builds it.
+        import xacro  # noqa: WPS433  (ROS xacro python module)
+        tpl = get_package_share_directory("human_description") + "/urdf/human-tpl.xacro"
+        self.urdf = xacro.process_file(tpl, mappings={"id": self.bid, "height": str(float(p("height_m").value))}).toxml()
+        self.pub_urdf.publish(String(data=self.urdf))
+
+        self.rsp = None
+        if bool(p("spawn_state_publisher").value):
+            cmd = ["ros2", "run", "robot_state_publisher", "robot_state_publisher", "--ros-args",
+                   "-r", f"__node:=robot_state_publisher_body_{self.bid}",
+                   "-p", f"robot_description:={self.urdf}",
+                   "-r", f"joint_states:={js_topic}", "-r", f"robot_description:={urdf_topic}"]
+            self.rsp = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Place the operator in the world (office side), like a tracked body's root frame.
+        x, y, z, yaw = [float(v) for v in p("body_pose").value]
+        self.static_tf = StaticTransformBroadcaster(self)
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = str(p("world_frame").value)
+        t.child_frame_id = f"body_{self.bid}"
+        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = x, y, z
+        t.transform.rotation.z, t.transform.rotation.w = math.sin(yaw / 2), math.cos(yaw / 2)
+        self.static_tf.sendTransform(t)
+
         self.k = 0
         self.total = sum(d for d, _ in PHASES)
         self.create_timer(1.0 / float(p("ids_rate_hz").value), self.pub_tracked)
         self.create_timer(1.0 / self.rate, self.tick)
-        self.get_logger().info(f"body_sim '{self.bid}': {len(PHASES)} phases, {self.total:.0f} s loop")
+        self.get_logger().info(f"body_sim '{self.bid}': ROS4HRI human model ({len(REST)} joints), "
+                               f"{len(PHASES)} phases / {self.total:.0f} s loop, body at ({x}, {y}, {z})")
 
     def pub_tracked(self):
         m = IdsList()
@@ -61,14 +108,15 @@ class BodySim(Node):
         acc = 0.0
         for i, (d, ang) in enumerate(PHASES):
             if t < acc + d:
-                nxt = PHASES[(i + 1) % len(PHASES)][1]
-                into_blend = t - (acc + d - BLEND_S)
-                if into_blend > 0:
-                    s = 0.5 - 0.5 * math.cos(math.pi * into_blend / BLEND_S)
-                    return {k: ang[k] + (nxt[k] - ang[k]) * s for k in ang}, i
-                return dict(ang), i
+                cur = dict(REST, **ang)
+                nxt = dict(REST, **PHASES[(i + 1) % len(PHASES)][1])
+                into = t - (acc + d - BLEND_S)
+                if into > 0:
+                    s = 0.5 - 0.5 * math.cos(math.pi * into / BLEND_S)
+                    return {k: cur[k] + (nxt[k] - cur[k]) * s for k in cur}, i
+                return cur, i
             acc += d
-        return dict(PHASES[-1][1]), len(PHASES) - 1
+        return dict(REST, **PHASES[-1][1]), len(PHASES) - 1
 
     def tick(self):
         k = self.k
@@ -79,15 +127,19 @@ class BodySim(Node):
         ang, phase = self.posture(t)
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
-        js.header.frame_id = f"body_{self.bid}"
         for name, deg in ang.items():
-            wobble = 1.5 * math.sin(0.8 * t + hash(name) % 7)
-            js.name.append(name)
+            wobble = 1.5 * math.sin(0.8 * t + (hash(name) % 7))
+            js.name.append(f"{name}_{self.bid}")
             js.position.append(math.radians(deg + wobble))
         self.pub_js.publish(js)
         if k % int(self.rate * 5) == 0:
-            self.get_logger().info(f"t={t:5.1f}s phase {phase}: shoulder {ang['r_shoulder_flexion']:.0f} deg, "
-                                   f"neck {ang['neck_flexion']:.0f} deg, trunk {ang['trunk_flexion']:.0f} deg")
+            self.get_logger().info(f"t={t:5.1f}s phase {phase}: r_p_shoulder {ang['r_p_shoulder']:.0f} deg, "
+                                   f"p_head {ang['p_head']:.0f} deg, waist {ang['waist']:.0f} deg")
+
+    def destroy_node(self):
+        if self.rsp is not None:
+            self.rsp.terminate()
+        super().destroy_node()
 
 
 def main(args=None):

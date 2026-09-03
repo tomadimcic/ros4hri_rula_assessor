@@ -26,6 +26,23 @@ from ros4hri_rula_assessor.rula import Angles, assess
 ROLES = ["upper_arm_flexion", "upper_arm_abduction", "lower_arm_flexion", "wrist_flexion",
          "wrist_deviation", "wrist_twist", "neck_flexion", "neck_twist", "neck_side_bend",
          "trunk_flexion", "trunk_twist", "trunk_side_bend"]
+REQUIRED = ("upper_arm_flexion", "lower_arm_flexion", "neck_flexion", "trunk_flexion")
+
+# Joint-name templates for the ROS4HRI human kinematic model (ros4hri/human_description,
+# urdf/human-tpl.xacro), as published on /humans/bodies/<id>/joint_states by hri_body_detect
+# and hri_fullbody. {side} is r/l, {id} the REP-155 body id. The model has no wrist joints,
+# so the wrist roles are empty by default; a VR hand-tracking node may add them.
+ROS4HRI_JOINTS = {
+    "upper_arm_flexion": "{side}_p_shoulder_{id}",      # shoulder pitch: raise arm forward
+    "upper_arm_abduction": "{side}_y_shoulder_{id}",    # shoulder yaw: arm out to the side
+    "lower_arm_flexion": "{side}_elbow_{id}",           # 0 = straight arm
+    "wrist_flexion": "", "wrist_deviation": "", "wrist_twist": "",
+    "neck_flexion": "p_head_{id}",                      # head pitch
+    "neck_twist": "y_head_{id}",                        # head yaw
+    "neck_side_bend": "r_head_{id}",                    # head roll
+    "trunk_flexion": "waist_{id}",                      # waist pitch
+    "trunk_twist": "", "trunk_side_bend": "",
+}
 
 
 class RulaAssessor(Node):
@@ -39,18 +56,13 @@ class RulaAssessor(Node):
         self.declare_parameter("legs", 1)
         self.declare_parameter("bodies_topic", "/humans/bodies/tracked")
         side = str(self.get_parameter("side").value)
-        pre = "r_" if side == "right" else "l_"
-        defaults = {
-            "upper_arm_flexion": pre + "shoulder_flexion", "upper_arm_abduction": pre + "shoulder_abduction",
-            "lower_arm_flexion": pre + "elbow_flexion", "wrist_flexion": pre + "wrist_flexion",
-            "wrist_deviation": pre + "wrist_deviation", "wrist_twist": pre + "wrist_twist",
-            "neck_flexion": "neck_flexion", "neck_twist": "neck_twist", "neck_side_bend": "neck_side_bend",
-            "trunk_flexion": "trunk_flexion", "trunk_twist": "trunk_twist", "trunk_side_bend": "trunk_side_bend",
-        }
-        self.joint_map = {}
+        self.side_letter = "r" if side == "right" else "l"
+        self.declare_parameter("invert_roles", [""])       # roles whose sign must be flipped for this producer
+        self.joint_tpl = {}
         for role in ROLES:
-            self.declare_parameter("joint_" + role, defaults[role])
-            self.joint_map[role] = str(self.get_parameter("joint_" + role).value)
+            self.declare_parameter("joint_" + role, ROS4HRI_JOINTS[role])
+            self.joint_tpl[role] = str(self.get_parameter("joint_" + role).value)
+        self.invert = {r for r in self.get_parameter("invert_roles").value if r}
         p = self.get_parameter
         self.side = side
         self.timeout = float(p("input_timeout_s").value)
@@ -62,8 +74,8 @@ class RulaAssessor(Node):
         self.create_subscription(IdsList, str(p("bodies_topic").value), self.on_ids, 10)
         self.pub = self.create_publisher(RulaScore, "/human/risk_score", 10)
         self.create_timer(1.0 / float(p("rate_hz").value), self.tick)
-        self.get_logger().info(f"RULA assessor: side={side}, {p('rate_hz').value} Hz, "
-                               f"joints e.g. {self.joint_map['upper_arm_flexion']}, {self.joint_map['neck_flexion']}")
+        self.get_logger().info(f"RULA assessor: side={side}, {p('rate_hz').value} Hz, ROS4HRI joints e.g. "
+                               f"{self.joint_tpl['upper_arm_flexion']}, {self.joint_tpl['neck_flexion']}")
 
     def on_ids(self, msg: IdsList):
         for bid in msg.ids:
@@ -83,14 +95,23 @@ class RulaAssessor(Node):
         if b is not None:
             b["js"], b["rx"] = msg, self.get_clock().now()
 
-    def angles_from(self, js: JointState):
+    def joint_name(self, role, bid):
+        tpl = self.joint_tpl.get(role, "")
+        return tpl.format(side=self.side_letter, id=bid) if tpl else ""
+
+    def angles_from(self, js: JointState, bid: str):
         pos = dict(zip(js.name, js.position))
-        vals = {}
-        for role, joint in self.joint_map.items():
-            if joint in pos:
-                vals[role] = math.degrees(pos[joint])
-        missing = [self.joint_map[r] for r in ("upper_arm_flexion", "lower_arm_flexion", "neck_flexion", "trunk_flexion") if r not in vals]
-        return Angles(**vals), missing
+        vals, missing, untracked = {}, [], []
+        for role in ROLES:
+            name = self.joint_name(role, bid)
+            if not name:
+                untracked.append(role)
+            elif name in pos:
+                v = math.degrees(pos[name])
+                vals[role] = -v if role in self.invert else v
+            elif role in REQUIRED:
+                missing.append(name)
+        return Angles(**vals), missing, untracked
 
     def tick(self):
         now = self.get_clock().now()
@@ -102,7 +123,7 @@ class RulaAssessor(Node):
                 m.valid, m.explanation = False, "no fresh joint data"
                 self.pub.publish(m)
                 continue
-            a, missing = self.angles_from(b["js"])
+            a, missing, untracked = self.angles_from(b["js"], bid)
             if missing:
                 m.valid, m.explanation = False, f"missing joints: {', '.join(missing)}"
                 self.pub.publish(m)
@@ -125,6 +146,8 @@ class RulaAssessor(Node):
             m.lower_arm_flexion_deg, m.wrist_flexion_deg, m.wrist_deviation_deg = a.lower_arm_flexion, a.wrist_flexion, a.wrist_deviation
             m.neck_flexion_deg, m.trunk_flexion_deg = a.neck_flexion, a.trunk_flexion
             m.explanation = r.explanation
+            if untracked and "wrist_flexion" in untracked:
+                m.explanation += "; wrist not tracked by this body model"
             self.pub.publish(m)
 
 

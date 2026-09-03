@@ -1,25 +1,52 @@
 # ros4hri_rula_assessor
 
-**ARISE reusable module #2 (Tele-Craft, Module B).** Computes the Rapid Upper Limb
-Assessment (RULA) in real time from REP-155 (ROS4HRI) body tracking, so an operator is
-warned about a harmful posture while they hold it, not after a video review.
+ARISE reusable module B (Tele-Craft experiment). Real-time RULA (Rapid Upper Limb
+Assessment, McAtamney & Corlett 1993) from REP-155 body tracking, at 10 Hz.
+Hardware-agnostic: it consumes joint angles of the ROS4HRI human model, whatever
+produced them (VR trackers, mocap suit, RGB camera).
 
-Status: package skeleton, M5 thin slice in progress (September 2026).
+License: LGPL-3.0. Two packages in this repository:
 
-## Interfaces (planned)
+* `rula_msgs` — `rula_msgs/RulaScore`: grand score, action level, every worksheet
+  component score, the joint angles they came from, validity and a human-readable
+  explanation of what drives the score.
+* `ros4hri_rula_assessor` — the assessor node, the pure-Python scoring library and a
+  synthetic body publisher for tests.
 
-| Direction | Topic | Type | Notes |
-|---|---|---|---|
-| in | `/humans/bodies/tracked` | `hri_msgs/IdsList` | REP-155 |
-| in | `/humans/bodies/<id>/joint_states`, `.../skeleton2d` | `sensor_msgs/JointState`, `hri_msgs/Skeleton2D` | per tracked body |
-| out | `/humans/bodies/<id>/rula` | RULA score, Group A/B sub-scores, action level, validity, explanation codes | 10 Hz |
-| out | `/human/risk_score` | aggregated risk for the active operator | 10 Hz |
+## Nodes
 
-* Joint angles filtered before scoring; ISO 11226 posture thresholds.
-* Source-agnostic: VR trackers, motion-capture suits or RGB cameras, as long as they
-  publish REP-155 bodies.
+### `assessor`
 
-## License
+| | Topic | Type |
+|---|---|---|
+| in | `/humans/bodies/tracked` | `hri_msgs/IdsList` (REP-155) |
+| in | `/humans/bodies/<id>/joint_states` | `sensor_msgs/JointState`, angles in rad |
+| out | `/human/risk_score` | `rula_msgs/RulaScore`, one per tracked body |
 
-LGPL-3.0-only. Developed in the Tele-Craft experiment of the ARISE project
-(EU Horizon Europe, arise-middleware.eu) by Entanglenet GmbH and Jazzing Automation.
+Joint names are parameters (`joint_upper_arm_flexion`, `joint_neck_flexion`, …) so the
+mapping to a deployment's `human_description` URDF is configuration. Defaults:
+`r_shoulder_flexion`, `r_shoulder_abduction`, `r_elbow_flexion`, `r_wrist_flexion`,
+`r_wrist_deviation`, `r_wrist_twist`, `neck_flexion`, `neck_twist`, `neck_side_bend`,
+`trunk_flexion`, `trunk_twist`, `trunk_side_bend`.
+
+Other parameters: `rate_hz` (10), `side` (right), `input_timeout_s` (0.5 → `valid=false`),
+`static_posture_s` (60, adds the muscle-use point), `force_load` (0–3), `legs` (1–2).
+
+### `body_sim`
+
+Synthetic REP-155 body: good posture → overhead reach → moderate → good, 45 s loop,
+`dropout_at_s` to exercise the validity flag.
+
+## Scoring
+
+`ros4hri_rula_assessor/rula.py` implements the worksheet: component scores from angles,
+Tables A, B and C, muscle-use and force points, action levels 1–4. It has no ROS
+dependency and is unit-testable.
+
+## Try it
+
+```bash
+ros2 run ros4hri_rula_assessor body_sim
+ros2 run ros4hri_rula_assessor assessor
+ros2 topic echo /human/risk_score
+```

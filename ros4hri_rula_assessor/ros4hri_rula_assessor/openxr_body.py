@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # Copyright 2026 Entanglenet GmbH
 # SPDX-License-Identifier: LGPL-3.0-only
-"""openxr_body: OpenXR headset / controller / tracker poses -> REP-155 body (ROS4HRI model).
+"""openxr_body: VR tracking (headset, controllers, trackers) -> REP-155 body (ROS4HRI model).
 
-The VR tracking front-end of the RULA module. Works with the real headset client and with
-openxr_sim alike. It turns the tracked points of a *seated* welder into joint angles of the
-ros4hri human_description model and publishes them exactly like hri_body_detect would:
+The VR tracking front-end of the RULA module. It consumes the tracked points that
+openxr_ros2_bridge already converted to the ROS frame, so it never touches OpenXR data itself,
+and turns a *seated* welder's points into joint angles of the ros4hri human_description model,
+published exactly like hri_body_detect would:
 
-  in   /openxr/head/pose, /openxr/right_hand/pose, /openxr/left_hand/pose
-       /openxr/trackers/right_elbow/pose, /openxr/trackers/chest/pose   (optional)
+  in   /openxr_ros2_bridge/tracking/{head,right_hand,left_hand}          REP-103 frame
+       /openxr_ros2_bridge/tracking/{right_elbow,chest}                   optional trackers
   out  /humans/bodies/tracked                 hri_msgs/IdsList
        /humans/bodies/<id>/joint_states       sensor_msgs/JointState   ROS4HRI joints + wrist joints
        /humans/bodies/<id>/urdf               std_msgs/String (latched), robot_state_publisher spawned
@@ -36,11 +37,6 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_ros import StaticTransformBroadcaster
-
-# OpenXR stage (x right, y up, z back) -> ROS (x fwd, y left, z up)
-def xr_to_ros(p):
-    return (-p[2], -p[0], p[1])
-
 
 def q_to_mat(q):
     x, y, z, w = q
@@ -127,7 +123,8 @@ class OpenXRBody(Node):
         self.declare_parameter("input_timeout_s", 0.3)
         self.declare_parameter("world_frame", "world")
         self.declare_parameter("body_pose", [-2.0, 1.2, 0.45, 0.0])    # pelvis of the seated welder in world
-        self.declare_parameter("shoulder_offset_xr", [0.19, 1.09, 0.0]) # right shoulder in stage frame (seated, 1.75 m)
+        self.declare_parameter("tracking_prefix", "/openxr_ros2_bridge/tracking")
+        self.declare_parameter("shoulder_offset", [0.0, -0.19, 1.09])   # right shoulder, ROS frame (x fwd, y left, z up), seated 1.75 m
         self.declare_parameter("upper_arm_m", 0.373)                    # human_description proportions
         self.declare_parameter("forearm_m", 0.233)
         self.declare_parameter("seated", True)
@@ -143,7 +140,7 @@ class OpenXRBody(Node):
         p = self.get_parameter
         self.bid = str(p("body_id").value)
         self.timeout = float(p("input_timeout_s").value)
-        self.shoulder = xr_to_ros(tuple(float(v) for v in p("shoulder_offset_xr").value))
+        self.shoulder = tuple(float(v) for v in p("shoulder_offset").value)
         self.l_upper = float(p("upper_arm_m").value)
         self.l_fore = float(p("forearm_m").value)
         self.seated = bool(p("seated").value)
@@ -154,10 +151,10 @@ class OpenXRBody(Node):
 
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
         self.rx = {}
-        for key, topic in (("head", "/openxr/head/pose"), ("rhand", "/openxr/right_hand/pose"),
-                           ("lhand", "/openxr/left_hand/pose"), ("relbow", "/openxr/trackers/right_elbow/pose"),
-                           ("chest", "/openxr/trackers/chest/pose")):
-            self.create_subscription(PoseStamped, topic, lambda m, k=key: self.on_pose(k, m), qos)
+        prefix = str(p("tracking_prefix").value).rstrip("/")
+        for key, name in (("head", "head"), ("rhand", "right_hand"), ("lhand", "left_hand"),
+                          ("relbow", "right_elbow"), ("chest", "chest")):
+            self.create_subscription(PoseStamped, f"{prefix}/{name}", lambda m, k=key: self.on_pose(k, m), qos)
 
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -191,7 +188,7 @@ class OpenXRBody(Node):
         self.create_timer(1.0 / float(p("ids_rate_hz").value), self.pub_tracked)
         self.create_timer(1.0 / float(p("rate_hz").value), self.tick)
         self.n = 0
-        self.get_logger().info(f"openxr_body '{self.bid}': OpenXR -> ROS4HRI body, seated={self.seated}")
+        self.get_logger().info(f"openxr_body '{self.bid}': {prefix}/* -> ROS4HRI body, seated={self.seated}")
 
     def srv_calibrate(self, rq, rs):
         self.wrist_offset = list(self.raw_wrist)
@@ -200,7 +197,7 @@ class OpenXRBody(Node):
         return rs
 
     def on_pose(self, key, msg: PoseStamped):
-        pos = xr_to_ros((msg.pose.position.x, msg.pose.position.y, msg.pose.position.z))
+        pos = (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)      # already REP-103
         q = (msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w)
         self.rx[key] = (pos, q, self.get_clock().now())
 
@@ -218,12 +215,11 @@ class OpenXRBody(Node):
 
     # ---- geometry -----------------------------------------------------------
     @staticmethod
-    def hand_axes_ros(q_xr):
-        """Hand frame axes in ROS coordinates: pointing axis (OpenXR -Z), palm-up axis (OpenXR +Y)."""
-        m = q_to_mat(q_xr)
-        fwd_xr = tuple(-c for c in mat_col(m, 2))
-        up_xr = mat_col(m, 1)
-        return xr_to_ros(fwd_xr), xr_to_ros(up_xr)
+    def hand_axes_ros(q_ros):
+        """Frame axes of a tracked point in ROS coordinates: pointing axis (+X) and up axis (+Z).
+        The bridge's basis change maps OpenXR -Z (pointing) to +X and OpenXR +Y (up) to +Z."""
+        m = q_to_mat(q_ros)
+        return mat_col(m, 0), mat_col(m, 2)
 
     def tick(self):
         rhand = self.fresh("rhand")

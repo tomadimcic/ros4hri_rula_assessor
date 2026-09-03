@@ -34,8 +34,9 @@ Other parameters: `rate_hz` (10), `side` (right), `input_timeout_s` (0.5 → `va
 
 ### `openxr_body`
 
-VR tracking front-end: headset, controller and Ultimate Tracker poses (`/openxr/...`, OpenXR
-stage frame) → REP-155 body of a *seated* welder. Joint angles of the human_description model
+VR tracking front-end: the tracked points that `openxr_ros2_bridge` already converted to the ROS
+frame (`/openxr_ros2_bridge/tracking/{head,right_hand,left_hand,right_elbow,chest}`) → REP-155 body
+of a *seated* welder. It never reads OpenXR data itself. Joint angles of the human_description model
 (mapping verified against its forward kinematics, < 0.5 cm), plus explicit RULA joints
 (`r_upper_arm_flexion`, `r_upper_arm_abduction`, `neck_flexion`, `trunk_flexion`) and wrist
 joints from the hand orientation relative to the forearm (`~/calibrate_wrist` sets the neutral

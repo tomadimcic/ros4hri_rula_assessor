@@ -32,6 +32,23 @@ mapping to a deployment's `human_description` URDF is configuration. Defaults:
 Other parameters: `rate_hz` (10), `side` (right), `input_timeout_s` (0.5 → `valid=false`),
 `static_posture_s` (60, adds the muscle-use point), `force_load` (0–3), `legs` (1–2).
 
+### `openxr_body`
+
+VR tracking front-end: headset, controller and Ultimate Tracker poses (`/openxr/...`, OpenXR
+stage frame) → REP-155 body of a *seated* welder. Joint angles of the human_description model
+(mapping verified against its forward kinematics, < 0.5 cm), plus explicit RULA joints
+(`r_upper_arm_flexion`, `r_upper_arm_abduction`, `neck_flexion`, `trunk_flexion`) and wrist
+joints from the hand orientation relative to the forearm (`~/calibrate_wrist` sets the neutral
+grip). The elbow tracker is optional (two-link estimate without it). `spawn_state_publisher`
+adds the skeleton to TF for RViz.
+
+### `prompter`
+
+`RulaScore` → `rula_msgs/ErgoPrompt` on `/human/ergo_prompt`: INFO (RULA ≤ 2), ATTENTION (3–4),
+WARNING (≥ 5) with dwell-time hysteresis (`dwell_s` to raise, `clear_s` to lower) and a plain
+sentence naming what drives the score. This is the "Guardian Angel" message the VR overlay
+renders; the operator console previews it.
+
 ### `body_sim`
 
 Synthetic REP-155 body: good posture → overhead reach → moderate → good, 45 s loop,

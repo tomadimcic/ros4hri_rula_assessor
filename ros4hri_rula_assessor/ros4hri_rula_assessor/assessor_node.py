@@ -13,6 +13,7 @@ Out: /human/risk_score                      rula_msgs/RulaScore     one per trac
 Joint names are parameters (joint_* below) so the mapping to the human_description
 URDF of a given deployment is configuration, not code.
 """
+from functools import partial
 import math
 
 from hri_msgs.msg import IdsList
@@ -87,7 +88,7 @@ class RulaAssessor(Node):
         for bid in msg.ids:
             if bid not in self.bodies:
                 topic = f"/humans/bodies/{bid}/joint_states"
-                sub = self.create_subscription(JointState, topic, lambda m, b=bid: self.on_js(b, m), 10)
+                sub = self.create_subscription(JointState, topic, partial(self.on_js, bid), 10)
                 self.bodies[bid] = dict(sub=sub, js=None, rx=None, key=None, since=None)
                 self.get_logger().info(f"tracking body '{bid}' via {topic}")
         for bid in list(self.bodies):

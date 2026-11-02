@@ -42,6 +42,15 @@ jobs:
           missing = [n for n in required if cases.get(n) != "passed"]
           if missing:
               sys.exit(f"required tests not passed: {missing}")
+      - name: mypy findings as annotations (only when the job failed)
+        if: failure()
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash && source ros_ws/install/setup.bash
+          cd "$(find ros_ws/src -path '*ros4hri_rula_assessor/package.xml' -printf '%h\n' | head -1)"
+          cfg=$(python3 -c 'import ament_mypy, os; print(os.path.join(os.path.dirname(ament_mypy.__file__), "configuration", "ament_mypy.ini"))')
+          python3 -m mypy --config-file "$cfg" --show-error-context --show-column-numbers . | tee mypy.txt || true
+          sed -nE 's#^([^:]+):([0-9]+):([0-9]+): error: (.*)$#::error file=\1,line=\2,col=\3,title=mypy::\4#p' mypy.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:

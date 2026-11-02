@@ -15,12 +15,12 @@ Posture timeline: good -> overhead reach -> moderate -> good (45 s loop), option
 import math
 import subprocess
 
-import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import TransformStamped
 from hri_msgs.msg import IdsList
+import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster
@@ -40,6 +40,7 @@ BLEND_S = 3.0
 
 
 class BodySim(Node):
+
     def __init__(self):
         super().__init__("body_sim")
         self.declare_parameter("body_id", "b_sim01")
@@ -68,7 +69,8 @@ class BodySim(Node):
         # Body model from ros4hri/human_description, exactly as hri_body_detect builds it.
         import xacro  # noqa: WPS433  (ROS xacro python module)
         tpl = get_package_share_directory("human_description") + "/urdf/human-tpl.xacro"
-        self.urdf = xacro.process_file(tpl, mappings={"id": self.bid, "height": str(float(p("height_m").value))}).toxml()
+        mappings = {"id": self.bid, "height": str(float(p("height_m").value))}
+        self.urdf = xacro.process_file(tpl, mappings=mappings).toxml()
         self.pub_urdf.publish(String(data=self.urdf))
 
         self.rsp = None

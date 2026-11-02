@@ -18,7 +18,7 @@ import random
 
 import pytest
 
-from ros4hri_rula_assessor.openxr_body import OpenXRBody, mat_mul, q_to_mat
+from ros4hri_rula_assessor.openxr_body import mat_mul, OpenXRBody, q_to_mat
 
 X, Y, Z = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
 
@@ -70,8 +70,10 @@ POS = {"rua": (0.0, -0.2, 1.0), "rfa": (0.1, -0.2, 0.8), "rhand": (0.2, -0.2, 0.
 
 
 def feed(b, yaw, mounts, sh=I3, el=I3, wr=I3, head=I3, pos=POS):
-    """World orientations (ROS frame) of the devices for a posture, as openxr_body receives them. The angles come
-    from the orientations only; the positions just have to be where an arm can put the trackers."""
+    """Return the world orientations (ROS frame) of the devices for a posture, as openxr_body receives them.
+
+    The angles come from the orientations only; the positions just have to be where an arm can put the trackers.
+    """
     body = rot(Z, yaw)
     ua = mat_mul(body, sh)
     fa = mat_mul(ua, el)
@@ -105,7 +107,8 @@ def test_arm_trackers_recover_the_posture(tmp_path, seed):
     feed(b, yaw, mounts, head=rot(Y, 10))                  # calibration pose, looking slightly down
     ok, text = b.calibrate_arm()
     assert ok, text
-    assert math.isclose(math.degrees(b.calib["yaw"]), yaw, abs_tol=1e-6) or abs(abs(math.degrees(b.calib["yaw"]) - yaw) - 360) < 1e-6
+    got = math.degrees(b.calib["yaw"])
+    assert math.isclose(got, yaw, abs_tol=1e-6) or abs(abs(got - yaw) - 360) < 1e-6
     for joints, expected in POSTURES:
         feed(b, yaw, mounts, **joints)
         ang, source = b.compute(b.rx["rhand"])

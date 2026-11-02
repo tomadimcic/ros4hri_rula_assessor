@@ -11,7 +11,7 @@ import re
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rula_msgs.msg import ErgoPrompt, RulaScore
 
 
@@ -34,6 +34,7 @@ def short_drivers(explanation: str) -> str:
 
 
 class Prompter(Node):
+
     def __init__(self):
         super().__init__("rula_prompter")
         self.declare_parameter("warning_score", 5)
@@ -56,7 +57,8 @@ class Prompter(Node):
         self.candidate_since = None
         self.last = None
         self.create_timer(1.0 / float(p("rate_hz").value), self.tick)
-        self.get_logger().info(f"prompter: warning at RULA >= {self.warn}, attention at >= {self.attn}, dwell {self.dwell}s / clear {self.clear}s")
+        self.get_logger().info(f"prompter: warning at RULA >= {self.warn}, attention at >= {self.attn}, "
+                               f"dwell {self.dwell}s / clear {self.clear}s")
 
     def on_score(self, m: RulaScore):
         self.last = m

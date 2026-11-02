@@ -15,8 +15,8 @@ URDF of a given deployment is configuration, not code.
 """
 import math
 
-import rclpy
 from hri_msgs.msg import IdsList
+import rclpy
 from rclpy.node import Node
 from rula_msgs.msg import RulaScore
 from sensor_msgs.msg import JointState
@@ -33,8 +33,10 @@ REQUIRED = ("upper_arm_flexion", "lower_arm_flexion", "neck_flexion", "trunk_fle
 # and hri_fullbody. {side} is r/l, {id} the REP-155 body id. The model has no wrist joints,
 # so the wrist roles are empty by default; a VR hand-tracking node may add them.
 ROS4HRI_JOINTS = {
-    "upper_arm_flexion": "{side}_upper_arm_flexion_{id}|{side}_p_shoulder_{id}",      # explicit sagittal angle, else shoulder pitch
-    "upper_arm_abduction": "{side}_upper_arm_abduction_{id}|{side}_y_shoulder_{id}",  # explicit frontal angle, else shoulder yaw
+    # explicit sagittal angle, else shoulder pitch
+    "upper_arm_flexion": "{side}_upper_arm_flexion_{id}|{side}_p_shoulder_{id}",
+    # explicit frontal angle, else shoulder yaw
+    "upper_arm_abduction": "{side}_upper_arm_abduction_{id}|{side}_y_shoulder_{id}",
     "lower_arm_flexion": "{side}_elbow_{id}",           # 0 = straight arm
     "wrist_flexion": "{side}_wrist_flexion_{id}", "wrist_deviation": "{side}_wrist_deviation_{id}",
     "wrist_twist": "{side}_wrist_twist_{id}",      # not in human_description; published by openxr_body
@@ -47,6 +49,7 @@ ROS4HRI_JOINTS = {
 
 
 class RulaAssessor(Node):
+
     def __init__(self):
         super().__init__("ros4hri_rula_assessor")
         self.declare_parameter("rate_hz", 10.0)
@@ -99,8 +102,11 @@ class RulaAssessor(Node):
             b["js"], b["rx"] = msg, self.get_clock().now()
 
     def joint_name(self, role, bid, available=None):
-        """Template may list alternatives separated by '|' (first one present wins) and a leading '-'
-        negates the value. Returns (name, sign)."""
+        """Return (name, sign) of a role's joint.
+
+        The template may list alternatives separated by '|' (first one present wins); a leading '-' negates
+        the value.
+        """
         tpl = self.joint_tpl.get(role, "")
         if not tpl:
             return "", 1.0
@@ -160,7 +166,8 @@ class RulaAssessor(Node):
             m.upper_arm, m.lower_arm, m.wrist, m.wrist_twist = r.upper_arm, r.lower_arm, r.wrist, r.wrist_twist
             m.neck, m.trunk, m.legs, m.muscle_use, m.force_load = r.neck, r.trunk, r.legs, r.muscle_use, r.force_load
             m.upper_arm_flexion_deg, m.upper_arm_abduction_deg = a.upper_arm_flexion, a.upper_arm_abduction
-            m.lower_arm_flexion_deg, m.wrist_flexion_deg, m.wrist_deviation_deg = a.lower_arm_flexion, a.wrist_flexion, a.wrist_deviation
+            m.lower_arm_flexion_deg, m.wrist_flexion_deg = a.lower_arm_flexion, a.wrist_flexion
+            m.wrist_deviation_deg = a.wrist_deviation
             m.neck_flexion_deg, m.trunk_flexion_deg = a.neck_flexion, a.trunk_flexion
             m.explanation = r.explanation
             if untracked and "wrist_flexion" in untracked:

@@ -136,8 +136,13 @@ def score_neck(a: Angles):
 
 
 def score_trunk(a: Angles, sitting_supported=True):
+    """Score the trunk: upright 1, up to 20 deg flexion 2, 20-60 deg 3, more 4; +1 twisted, +1 side bending.
+
+    The worksheet scores an upright trunk 1 "also if well supported while seated": upright scores 1 sitting or
+    standing, so sitting_supported no longer changes the score (until 2 Nov 2026 a standing, upright trunk scored 2).
+    """
     t = a.trunk_flexion
-    if t <= 2 and sitting_supported:
+    if t <= 2:
         s = 1
     elif t <= 20:
         s = 2
@@ -167,6 +172,7 @@ def assess(a: Angles, legs=1, muscle_use=0, force_load=0, **flags) -> Result:
     score = TABLE_C[_clamp(sa, 1, 8) - 1][_clamp(sb, 1, 7) - 1]
     level = 1 if score <= 2 else (2 if score <= 4 else (3 if score <= 6 else 4))
     drivers = []
+
     def fe(v):
         return f"flexion {v:.0f} deg" if v >= 0 else f"extension {-v:.0f} deg"
     if ua >= 3:

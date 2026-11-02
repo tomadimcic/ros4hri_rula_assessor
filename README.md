@@ -68,3 +68,18 @@ ros2 run ros4hri_rula_assessor body_sim
 ros2 run ros4hri_rula_assessor assessor
 ros2 topic echo /human/risk_score
 ```
+
+## Tests
+
+`colcon test --packages-select ros4hri_rula_assessor` runs, on every push in CI on ROS 2 Jazzy
+(`.github/workflows/ci.yml`, which builds `rula_msgs` and this package):
+
+| Test | What it checks |
+| --- | --- |
+| `test_flake8`, `test_pep257`, `test_xmllint`, `test_mypy` | ament linters; house style in `setup.cfg` (double quotes, lines up to 120 characters) |
+| `test_copyright` | skipped: the sources are LGPL-3.0-only (SPDX headers), which ament_copyright does not recognise |
+| `test_rula_worksheet` | the RULA worksheet (McAtamney & Corlett, 1993): every component's ranges and adjustments, Tables A, B and C, action levels, expected values worked out by hand from the published tables |
+| `test_openxr_body_arm` | arm calibration and the joint angles of known postures from segment trackers with random strap orientations |
+
+An upright trunk scores 1 whether the operator sits or stands, as on the worksheet ("also if well
+supported while seated"); before 2 Nov 2026 a standing, upright trunk scored 2.

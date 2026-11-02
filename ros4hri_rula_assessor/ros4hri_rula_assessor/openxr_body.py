@@ -45,16 +45,17 @@ import math
 import os
 import subprocess
 
-import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from hri_msgs.msg import IdsList
+import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState, Joy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_ros import StaticTransformBroadcaster
+
 
 def q_to_mat(q):
     x, y, z, w = q
@@ -126,8 +127,10 @@ def elbow_estimate(shoulder, hand, l_upper, l_fore, hint=(0.0, -0.35, -1.0)):
 
 
 def arm_angles(shoulder, elbow, hand):
-    """Right-arm joint angles (deg) of the ros4hri human model for given shoulder/elbow/hand positions
-    (ROS frame of the body: x forward, y left, z up), plus the RULA sagittal/frontal angles.
+    """Return the right-arm joint angles (deg) of the ros4hri human model and the RULA angles.
+
+    Input: shoulder/elbow/hand positions (ROS frame of the body: x forward, y left, z up); the RULA angles are the
+    sagittal (flexion) and frontal (abduction) ones.
 
     Model chain (verified with TF): r_y_shoulder yaw about vertical (0 = arm out to the side, +90 = in
     front), r_p_shoulder polar angle from hanging down, r_r_shoulder roll about the upper arm (at 0 the
@@ -153,6 +156,7 @@ def arm_angles(shoulder, elbow, hand):
 
 
 class OpenXRBody(Node):
+
     def __init__(self):
         super().__init__("openxr_body")
         self.declare_parameter("body_id", "welder")
@@ -163,7 +167,8 @@ class OpenXRBody(Node):
         self.declare_parameter("world_frame", "world")
         self.declare_parameter("body_pose", [-2.0, 1.2, 0.45, 0.0])    # pelvis of the seated welder in world
         self.declare_parameter("tracking_prefix", "/openxr_ros2_bridge/tracking")
-        self.declare_parameter("shoulder_offset", [0.0, -0.19, 1.09])   # right shoulder, ROS frame (x fwd, y left, z up), seated 1.75 m
+        # right shoulder, ROS frame (x fwd, y left, z up), seated 1.75 m
+        self.declare_parameter("shoulder_offset", [0.0, -0.19, 1.09])
         self.declare_parameter("upper_arm_m", 0.373)                    # human_description proportions
         self.declare_parameter("forearm_m", 0.233)
         self.declare_parameter("seated", True)
@@ -172,7 +177,8 @@ class OpenXRBody(Node):
         self.declare_parameter("shoulder_pitch_sign", 1.0)
         self.declare_parameter("shoulder_yaw_sign", 1.0)
         self.declare_parameter("shoulder_roll_sign", 1.0)
-        self.declare_parameter("head_pitch_sign", -1.0)   # model: +p_head = extension; we publish "looking down" positive
+        # model: +p_head = extension; we publish "looking down" positive
+        self.declare_parameter("head_pitch_sign", -1.0)
         self.declare_parameter("waist_sign", 1.0)
         # wrist angles are measured relative to a neutral grip; set by ~/calibrate_wrist or here
         self.declare_parameter("wrist_offset_deg", [0.0, 0.0, 0.0])
@@ -189,7 +195,8 @@ class OpenXRBody(Node):
         self.l_upper = float(p("upper_arm_m").value)
         self.l_fore = float(p("forearm_m").value)
         self.seated = bool(p("seated").value)
-        self.sg = {k: float(p(k).value) for k in ("shoulder_pitch_sign", "shoulder_yaw_sign", "shoulder_roll_sign", "head_pitch_sign", "waist_sign")}
+        self.sg = {k: float(p(k).value) for k in ("shoulder_pitch_sign", "shoulder_yaw_sign", "shoulder_roll_sign",
+                                                  "head_pitch_sign", "waist_sign")}
         self.wrist_offset = [float(v) for v in p("wrist_offset_deg").value]
         self.raw_wrist = (0.0, 0.0, 0.0)
         self.source = ""
@@ -234,7 +241,8 @@ class OpenXRBody(Node):
 
         import xacro  # noqa: WPS433
         tpl = get_package_share_directory("human_description") + "/urdf/human-tpl.xacro"
-        self.urdf = xacro.process_file(tpl, mappings={"id": self.bid, "height": str(float(p("height_m").value))}).toxml()
+        mappings = {"id": self.bid, "height": str(float(p("height_m").value))}
+        self.urdf = xacro.process_file(tpl, mappings=mappings).toxml()
         self.pub_urdf.publish(String(data=self.urdf))
         self.rsp = None
         if bool(p("spawn_state_publisher").value):
@@ -345,8 +353,10 @@ class OpenXRBody(Node):
     # ---- geometry -----------------------------------------------------------
     @staticmethod
     def hand_axes_ros(q_ros):
-        """Frame axes of a tracked point in ROS coordinates: pointing axis (+X) and up axis (+Z).
-        The bridge's basis change maps OpenXR -Z (pointing) to +X and OpenXR +Y (up) to +Z."""
+        """Return the frame axes of a tracked point in ROS coordinates: pointing axis (+X) and up axis (+Z).
+
+        The bridge's basis change maps OpenXR -Z (pointing) to +X and OpenXR +Y (up) to +Z.
+        """
         m = q_to_mat(q_ros)
         return mat_col(m, 0), mat_col(m, 2)
 
@@ -436,7 +446,8 @@ class OpenXRBody(Node):
         js.header.stamp = self.get_clock().now().to_msg()
         sg = self.sg
         vals = {
-            "waist": sg["waist_sign"] * trunk_pitch, "p_head": sg["head_pitch_sign"] * n_pitch, "y_head": n_yaw, "r_head": n_roll,
+            "waist": sg["waist_sign"] * trunk_pitch, "p_head": sg["head_pitch_sign"] * n_pitch,
+            "y_head": n_yaw, "r_head": n_roll,
             "r_p_shoulder": sg["shoulder_pitch_sign"] * polar, "r_y_shoulder": sg["shoulder_yaw_sign"] * azimuth,
             "r_r_shoulder": sg["shoulder_roll_sign"] * roll, "r_elbow": elbow_flex,
             # explicit RULA angles, independent of the model chain and its sign conventions
@@ -455,8 +466,10 @@ class OpenXRBody(Node):
         self.pub_js.publish(js)
         self.n += 1
         if self.n % 150 == 0:
-            self.get_logger().info(f"upper arm flex {flexion:.0f} abd {abduction:.0f} (model polar {polar:.0f} az {azimuth:.0f} roll {roll:.0f}) deg, elbow {elbow_flex:.0f} deg, "
-                                   f"wrist {w_flex:.0f}/{w_dev:.0f} deg, neck {n_pitch:.0f} deg, trunk {trunk_pitch:.0f} deg ({source})")
+            self.get_logger().info(f"upper arm flex {flexion:.0f} abd {abduction:.0f} (model polar {polar:.0f} "
+                                   f"az {azimuth:.0f} roll {roll:.0f}) deg, elbow {elbow_flex:.0f} deg, "
+                                   f"wrist {w_flex:.0f}/{w_dev:.0f} deg, neck {n_pitch:.0f} deg, "
+                                   f"trunk {trunk_pitch:.0f} deg ({source})")
 
     def destroy_node(self):
         if self.rsp is not None:

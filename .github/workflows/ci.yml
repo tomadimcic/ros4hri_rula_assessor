@@ -1,0 +1,22 @@
+# Build rula_msgs and ros4hri_rula_assessor and run their tests on ROS 2 Jazzy (the ARISE reference distribution):
+# ament linters and the RULA worksheet and body tests. hri_msgs and human_description come from the Jazzy packages.
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          package-name: rula_msgs ros4hri_rula_assessor
+          target-ros2-distro: jazzy
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: colcon-logs
+          path: ros_ws/log

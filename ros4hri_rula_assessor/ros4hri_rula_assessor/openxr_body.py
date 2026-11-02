@@ -10,6 +10,9 @@ published exactly like hri_body_detect would:
 
   in   /openxr_ros2_bridge/tracking/{head,right_hand,left_hand}          REP-103 frame
        /openxr_ros2_bridge/tracking/{right_elbow,chest}                   optional trackers
+       /openxr_ros2_bridge/tracking/{right_upper_arm,right_forearm}       optional segment trackers (see below)
+       calibrate_joy_topic (Joy, default /openxr/right_hand/inputs)        grip held 2 s = arm calibration
+  out  note_topic (std_msgs/String)            "arm calibrated" etc., shown on the headset panel
   out  /humans/bodies/tracked                 hri_msgs/IdsList
        /humans/bodies/<id>/joint_states       sensor_msgs/JointState   ROS4HRI joints + wrist joints
        /humans/bodies/<id>/urdf               std_msgs/String (latched), robot_state_publisher spawned
@@ -23,8 +26,23 @@ Angles (deg, in the joint_states as rad):
   waist                             trunk pitch from the chest tracker
   r_wrist_flexion/deviation/twist   hand orientation relative to the forearm (extension of the model)
 The elbow tracker is optional: without it the elbow is estimated from the hand with a two-link arm.
+
+Segment trackers: a tracker strapped anywhere on the upper arm and one on the forearm give the direction of each
+segment from their orientation, once the way each sits on its segment is known. Calibration pose: sit upright,
+look straight ahead, let the right arm hang straight down and relaxed with the controller in a neutral grip, and
+hold the grip for calibrate_hold_s (or call ~/calibrate_arm). That stores each segment's "down" axis in its
+tracker's frame, the body's forward direction (head yaw) and the neutral wrist; it is saved to calibration_file.
+The wrist is then the rotation of the controller relative to the forearm tracker, measured from that neutral grip
+about the forearm's own axes (long axis = twist, toward the palm = flexion, sideways = deviation), so it holds in
+any arm pose; the palm is taken to face the thigh in the calibration pose.
+With both trackers fresh, calibrated and where an arm can put them (forearm tracker within arm_tracker_max_m[0] of the
+controller, upper-arm tracker within [1], not at the same spot: a tracker without position tracking reports a
+placeholder position), the segment directions replace the fixed-shoulder estimate; the trunk is assumed upright and
+facing the calibrated forward direction (no chest tracker). Switching between the two is announced on note_topic.
 """
+import json
 import math
+import os
 import subprocess
 
 import rclpy
@@ -33,7 +51,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from hri_msgs.msg import IdsList
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, Joy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_ros import StaticTransformBroadcaster
@@ -68,6 +86,27 @@ def v_dot(a, b):
 
 def v_cross(a, b):
     return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def mat_vec(m, v):
+    return tuple(sum(m[i][j] * v[j] for j in range(3)) for i in range(3))
+
+
+def mat_t_vec(m, v):
+    return tuple(sum(m[j][i] * v[j] for j in range(3)) for i in range(3))
+
+
+def mat_mul(a, b):
+    return tuple(tuple(sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)) for i in range(3))
+
+
+def mat_t(m):
+    return tuple(tuple(m[j][i] for j in range(3)) for i in range(3))
+
+
+def rot_z(v, yaw):
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    return (c * v[0] - s_ * v[1], s_ * v[0] + c * v[1], v[2])
 
 
 def angle_between(a, b):
@@ -137,6 +176,12 @@ class OpenXRBody(Node):
         self.declare_parameter("waist_sign", 1.0)
         # wrist angles are measured relative to a neutral grip; set by ~/calibrate_wrist or here
         self.declare_parameter("wrist_offset_deg", [0.0, 0.0, 0.0])
+        self.declare_parameter("calibrate_joy_topic", "/openxr/right_hand/inputs")   # "" = service only
+        self.declare_parameter("calibrate_axis", 1)                                   # Joy axes[1] = grip
+        self.declare_parameter("calibrate_hold_s", 2.0)
+        self.declare_parameter("calibration_file", "~/.ros/openxr_body_arm_calibration.json")
+        self.declare_parameter("note_topic", "/telecraft/operator_note")
+        self.declare_parameter("arm_tracker_max_m", [0.45, 0.8])   # forearm / upper-arm tracker to controller
         p = self.get_parameter
         self.bid = str(p("body_id").value)
         self.timeout = float(p("input_timeout_s").value)
@@ -147,14 +192,37 @@ class OpenXRBody(Node):
         self.sg = {k: float(p(k).value) for k in ("shoulder_pitch_sign", "shoulder_yaw_sign", "shoulder_roll_sign", "head_pitch_sign", "waist_sign")}
         self.wrist_offset = [float(v) for v in p("wrist_offset_deg").value]
         self.raw_wrist = (0.0, 0.0, 0.0)
+        self.source = ""
+        self.last_note = ("", None)
         self.create_service(Trigger, "~/calibrate_wrist", self.srv_calibrate)
+        # segment trackers: "down" axis of each segment in its tracker's frame, and the body's forward yaw
+        self.calib = None
+        self.calib_file = os.path.expanduser(str(p("calibration_file").value))
+        self.arm_max = [float(v) for v in p("arm_tracker_max_m").value]
+        try:
+            with open(self.calib_file) as f:
+                c = json.load(f)
+            self.calib = {"ua": tuple(c["upper_arm_axis"]), "fa": tuple(c["forearm_axis"]), "yaw": float(c["yaw"]),
+                          "rel0": tuple(tuple(r) for r in c["wrist_neutral"]), "pal": tuple(c["palm_axis"])}
+            self.get_logger().info(f"arm calibration loaded from {self.calib_file} (recalibrate after re-strapping)")
+        except (OSError, KeyError, ValueError):
+            pass
+        self.create_service(Trigger, "~/calibrate_arm", self.srv_calibrate_arm)
+        self.pub_note = self.create_publisher(String, str(p("note_topic").value), 10)
+        self.cal_axis = int(p("calibrate_axis").value)
+        self.cal_hold = float(p("calibrate_hold_s").value)
+        self.grip_since, self.grip_done = None, False
+        joy_topic = str(p("calibrate_joy_topic").value)
 
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1)
         self.rx = {}
         prefix = str(p("tracking_prefix").value).rstrip("/")
         for key, name in (("head", "head"), ("rhand", "right_hand"), ("lhand", "left_hand"),
-                          ("relbow", "right_elbow"), ("chest", "chest")):
+                          ("relbow", "right_elbow"), ("chest", "chest"),
+                          ("rua", "right_upper_arm"), ("rfa", "right_forearm")):
             self.create_subscription(PoseStamped, f"{prefix}/{name}", lambda m, k=key: self.on_pose(k, m), qos)
+        if joy_topic:
+            self.create_subscription(Joy, joy_topic, self.on_joy, qos)
 
         latched = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                              history=HistoryPolicy.KEEP_LAST, depth=1)
@@ -191,10 +259,71 @@ class OpenXRBody(Node):
         self.get_logger().info(f"openxr_body '{self.bid}': {prefix}/* -> ROS4HRI body, seated={self.seated}")
 
     def srv_calibrate(self, rq, rs):
+        if self.source == "arm trackers":
+            rs.success, rs.message = False, "with the arm trackers the neutral wrist is part of ~/calibrate_arm"
+            return rs
         self.wrist_offset = list(self.raw_wrist)
         rs.success, rs.message = True, f"wrist neutral set to {[round(v, 1) for v in self.wrist_offset]} deg"
         self.get_logger().info(rs.message)
         return rs
+
+    # ---- arm calibration (segment trackers) ---------------------------------
+    def note(self, text):
+        self.pub_note.publish(String(data=text))
+        self.get_logger().info(text)
+        self.last_note = (text, self.get_clock().now())
+
+    def calibrate_arm(self):
+        rua, rfa, head, rhand = (self.fresh(k) for k in ("rua", "rfa", "head", "rhand"))
+        missing = [n for n, v in (("upper-arm tracker", rua), ("forearm tracker", rfa), ("headset", head),
+                                  ("controller", rhand)) if v is None]
+        if missing:
+            return False, "arm calibration failed: no " + ", ".join(missing)
+        if not self.arm_trackers_ok(rhand[0], rua, rfa):
+            return False, "arm calibration failed: the arm trackers are not on the arm (no position tracking?)"
+        down = (0.0, 0.0, -1.0)
+        ua = mat_t_vec(q_to_mat(rua[1]), down)                      # segment "down" in the tracker's own frame
+        fa = mat_t_vec(q_to_mat(rfa[1]), down)
+        hf = mat_col(q_to_mat(head[1]), 0)
+        yaw = math.atan2(hf[1], hf[0])
+        r_fa = q_to_mat(rfa[1])
+        rel0 = mat_mul(mat_t(r_fa), q_to_mat(rhand[1]))             # neutral hand orientation in the forearm frame
+        left = mat_t_vec(r_fa, (-math.sin(yaw), math.cos(yaw), 0.0))  # body left (palm normal of the right hand)
+        pal = v_unit(v_sub(left, tuple(c * v_dot(left, fa) for c in fa)))
+        self.calib = {"ua": ua, "fa": fa, "yaw": yaw, "rel0": rel0, "pal": pal}
+        try:
+            os.makedirs(os.path.dirname(self.calib_file), exist_ok=True)
+            with open(self.calib_file, "w") as f:
+                json.dump({"upper_arm_axis": ua, "forearm_axis": fa, "yaw": yaw, "wrist_neutral": rel0,
+                           "palm_axis": pal}, f, indent=1)
+        except OSError as e:
+            self.get_logger().warning(f"calibration not saved: {e}")
+        return True, f"arm calibrated (forward {math.degrees(yaw):.0f} deg)"
+
+    def arm_trackers_ok(self, hand, rua, rfa):
+        """Both segment trackers fresh and where an arm can put them (see module docstring)."""
+        if rua is None or rfa is None:
+            return False
+        return (math.dist(rfa[0], hand) < self.arm_max[0] and math.dist(rua[0], hand) < self.arm_max[1]
+                and math.dist(rua[0], rfa[0]) > 0.03)
+
+    def srv_calibrate_arm(self, rq, rs):
+        rs.success, rs.message = self.calibrate_arm()
+        self.note(rs.message)
+        return rs
+
+    def on_joy(self, msg: Joy):
+        grip = msg.axes[self.cal_axis] if len(msg.axes) > self.cal_axis else 0.0
+        trigger = msg.axes[0] if msg.axes else 0.0
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if grip >= 0.8 and trigger < 0.2:                            # never while hold-to-run is pressed
+            if self.grip_since is None:
+                self.grip_since, self.grip_done = now, False
+            elif not self.grip_done and now - self.grip_since >= self.cal_hold:
+                self.grip_done = True
+                self.note(self.calibrate_arm()[1])
+        else:
+            self.grip_since = None
 
     def on_pose(self, key, msg: PoseStamped):
         pos = (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)      # already REP-103
@@ -225,17 +354,49 @@ class OpenXRBody(Node):
         rhand = self.fresh("rhand")
         if rhand is None:
             return
+        ang, source = self.compute(rhand)
+        calibrated_now = (self.last_note[0].startswith("arm calibrated")
+                          and (self.get_clock().now() - self.last_note[1]).nanoseconds < 3e9)
+        if source != self.source and "arm trackers" in (source, self.source) and not calibrated_now:
+            self.note("RULA: arm trackers in use" if source == "arm trackers"
+                      else f"RULA: arm trackers not usable, {source}")
+        self.source = source
+        self.publish_angles(ang, source)
+
+    def compute(self, rhand):
+        """Joint angles from the tracked points. Returns (angles dict, source text)."""
         hand, q_hand, _ = rhand
-        relbow = self.fresh("relbow")
-        elbow = relbow[0] if relbow is not None else elbow_estimate(self.shoulder, hand, self.l_upper, self.l_fore)
-        ang = arm_angles(self.shoulder, elbow, hand)
-        polar, azimuth, roll, elbow_flex = ang["polar"], ang["azimuth"], ang["roll"], ang["elbow"]
-        flexion, abduction = ang["flexion"], ang["abduction"]
-        up_arm = v_sub(elbow, self.shoulder)              # shoulder -> elbow
-        fore = v_sub(hand, elbow)                         # elbow -> hand
-        fore = v_sub(hand, elbow)
-        # wrist: hand pointing axis vs forearm direction, relative to the neutral grip
         point, palm_up = self.hand_axes_ros(q_hand)
+        rua, rfa = self.fresh("rua"), self.fresh("rfa")
+        relbow = self.fresh("relbow")
+        yaw = 0.0
+        if self.calib is not None and self.arm_trackers_ok(hand, rua, rfa):
+            # segment trackers: directions in the body frame (x = calibrated forward, z up), virtual shoulder at 0
+            yaw = self.calib["yaw"]
+            u = rot_z(mat_vec(q_to_mat(rua[1]), self.calib["ua"]), -yaw)
+            f = rot_z(mat_vec(q_to_mat(rfa[1]), self.calib["fa"]), -yaw)
+            shoulder = (0.0, 0.0, 0.0)
+            elbow = tuple(self.l_upper * c for c in u)
+            hand_pt = tuple(elbow[i] + self.l_fore * f[i] for i in range(3))
+            source = "arm trackers"
+        else:
+            shoulder, hand_pt = self.shoulder, hand
+            elbow = relbow[0] if relbow is not None else elbow_estimate(self.shoulder, hand, self.l_upper, self.l_fore)
+            source = "elbow tracker" if relbow is not None else "elbow estimated"
+        ang = arm_angles(shoulder, elbow, hand_pt)
+        if source == "arm trackers":
+            # wrist: controller relative to the forearm tracker, from the neutral grip, about the forearm's own axes
+            c = self.calib
+            d = mat_mul(mat_mul(mat_t(q_to_mat(rfa[1])), q_to_mat(q_hand)), mat_t(c["rel0"]))
+            fa, pal = v_unit(c["fa"]), c["pal"]
+            third = v_cross(fa, pal)
+            pt, nm = mat_vec(d, fa), mat_vec(d, pal)
+            ang["wrist"] = (math.degrees(math.atan2(v_dot(pt, pal), v_dot(pt, fa))),      # flexion toward the palm +
+                            math.degrees(math.atan2(v_dot(pt, third), v_dot(pt, fa))),    # deviation
+                            math.degrees(math.atan2(v_dot(nm, third), v_dot(nm, pal))))   # twist about the forearm
+            return self.head_trunk(ang, source, yaw)
+        fore = v_sub(hand_pt, elbow)                      # elbow -> hand
+        # wrist: hand pointing axis vs forearm direction, relative to the neutral grip
         f = v_unit(fore)
         lateral = v_unit(v_cross((0.0, 0.0, 1.0), f)) if abs(f[2]) < 0.99 else (0.0, 1.0, 0.0)
         vertical = v_cross(f, lateral)
@@ -243,21 +404,34 @@ class OpenXRBody(Node):
                math.degrees(math.atan2(v_dot(point, lateral), v_dot(point, f))),
                math.degrees(math.atan2(v_dot(palm_up, lateral), v_dot(palm_up, vertical))))
         self.raw_wrist = raw
-        w_flex, w_dev, w_twist = (raw[i] - self.wrist_offset[i] for i in range(3))
-        # head relative to trunk
+        ang["wrist"] = tuple(raw[i] - self.wrist_offset[i] for i in range(3))
+        return self.head_trunk(ang, source, yaw)
+
+    def head_trunk(self, ang, source, yaw):
+        """Neck and trunk angles relative to the body's forward direction (yaw)."""
         head = self.fresh("head")
         chest = self.fresh("chest")
         trunk_pitch = 0.0
         if chest is not None:
             cf, cu = self.hand_axes_ros(chest[1])
+            cf, cu = rot_z(cf, -yaw), rot_z(cu, -yaw)
             trunk_pitch = math.degrees(math.atan2(cu[0], cu[2]))      # lean forward positive
         n_pitch = n_yaw = n_roll = 0.0
         if head is not None:
             hf, hu = self.hand_axes_ros(head[1])
+            hf, hu = rot_z(hf, -yaw), rot_z(hu, -yaw)
             n_pitch = math.degrees(math.atan2(-hf[2], hf[0])) - trunk_pitch     # looking down positive
             n_yaw = math.degrees(math.atan2(hf[1], hf[0]))
             n_roll = math.degrees(math.atan2(hu[1], hu[2]))
+        ang.update(trunk=trunk_pitch, neck=(n_pitch, n_yaw, n_roll))
+        return ang, source
 
+    def publish_angles(self, ang, source):
+        polar, azimuth, roll, elbow_flex = ang["polar"], ang["azimuth"], ang["roll"], ang["elbow"]
+        flexion, abduction = ang["flexion"], ang["abduction"]
+        w_flex, w_dev, w_twist = ang["wrist"]
+        trunk_pitch = ang["trunk"]
+        n_pitch, n_yaw, n_roll = ang["neck"]
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         sg = self.sg
@@ -282,8 +456,7 @@ class OpenXRBody(Node):
         self.n += 1
         if self.n % 150 == 0:
             self.get_logger().info(f"upper arm flex {flexion:.0f} abd {abduction:.0f} (model polar {polar:.0f} az {azimuth:.0f} roll {roll:.0f}) deg, elbow {elbow_flex:.0f} deg, "
-                                   f"wrist {w_flex:.0f}/{w_dev:.0f} deg, neck {n_pitch:.0f} deg, trunk {trunk_pitch:.0f} deg"
-                                   + ("" if relbow else " (elbow estimated)"))
+                                   f"wrist {w_flex:.0f}/{w_dev:.0f} deg, neck {n_pitch:.0f} deg, trunk {trunk_pitch:.0f} deg ({source})")
 
     def destroy_node(self):
         if self.rsp is not None:

@@ -80,6 +80,7 @@ ros2 topic echo /human/risk_score
 | `test_copyright` | skipped: the sources are LGPL-3.0-only (SPDX headers), which ament_copyright does not recognise |
 | `test_rula_worksheet` | the RULA worksheet (McAtamney & Corlett, 1993): every component's ranges and adjustments, Tables A, B and C, action levels, expected values worked out by hand from the published tables |
 | `test_openxr_body_arm` | arm calibration and the joint angles of known postures from segment trackers with random strap orientations |
+| `test_body_geometry` | the arm's joint angles reproduce shoulder, elbow and hand within 0.5 cm by forward kinematics in the model's joint convention (200 random postures); the elbow estimate without arm trackers keeps both segment lengths |
 
 An upright trunk scores 1 whether the operator sits or stands, as on the worksheet ("also if well
 supported while seated"); before 2 Nov 2026 a standing, upright trunk scored 2.

@@ -5,7 +5,7 @@ Assessment, McAtamney & Corlett 1993) from REP-155 body tracking, at 10 Hz.
 Hardware-agnostic: it consumes joint angles of the ROS4HRI human model, whatever
 produced them (VR trackers, mocap suit, RGB camera).
 
-License: LGPL-3.0. Two packages in this repository:
+License: LGPL-3.0-or-later (GNU Lesser General Public License, version 3 or any later version). Two packages in this repository:
 
 * `rula_msgs` — `rula_msgs/RulaScore`: grand score, action level, every worksheet
   component score, the joint angles they came from, validity and a human-readable

@@ -16,11 +16,6 @@ from ament_copyright.main import main
 import pytest
 
 
-# Remove the `skip` decorator once the source file(s) have a copyright header
-# The sources carry "SPDX-License-Identifier: LGPL-3.0-only". ament_copyright recognises LGPL 3 only through its
-# "version 3 or any later version" header, which would change the licence terms; until the owner decides, the
-# headers are checked by hand (every .py file has the copyright line and the SPDX identifier).
-@pytest.mark.skip(reason="LGPL-3.0-only headers (SPDX) are not recognised by ament_copyright")
 @pytest.mark.copyright
 @pytest.mark.linter
 def test_copyright() -> None:
